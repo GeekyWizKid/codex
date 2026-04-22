@@ -4,11 +4,14 @@ use codex_model_provider::create_model_provider;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
 
-pub(super) fn image_generation_tool_auth_allowed(auth_manager: Option<&AuthManager>) -> bool {
+pub(super) fn image_generation_tool_auth_allowed(
+    auth_manager: Option<&AuthManager>,
+    model_provider: &codex_model_provider_info::ModelProviderInfo,
+) -> bool {
     matches!(
         auth_manager.and_then(AuthManager::auth_mode),
         Some(AuthMode::Chatgpt)
-    )
+    ) || (model_provider.requires_openai_auth && auth_manager.is_some())
 }
 
 #[derive(Clone, Debug)]
@@ -153,6 +156,7 @@ impl TurnContext {
             features: &features,
             image_generation_tool_auth_allowed: image_generation_tool_auth_allowed(
                 self.auth_manager.as_deref(),
+                &config.model_provider,
             ),
             web_search_mode: self.tools_config.web_search_mode,
             session_source: self.session_source.clone(),
@@ -385,8 +389,10 @@ impl Session {
             model_info.slug.as_str(),
         );
         let session_source = session_configuration.session_source.clone();
-        let image_generation_tool_auth_allowed =
-            image_generation_tool_auth_allowed(auth_manager.as_deref());
+        let image_generation_tool_auth_allowed = image_generation_tool_auth_allowed(
+            auth_manager.as_deref(),
+            &per_turn_config.model_provider,
+        );
         let auth_manager_for_context = auth_manager.clone();
         let provider_for_context = create_model_provider(provider, auth_manager);
         let session_telemetry_for_context = session_telemetry;
@@ -710,5 +716,61 @@ impl Session {
             /*turn_environments*/ None,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::image_generation_tool_auth_allowed;
+    use codex_login::AuthManager;
+    use codex_login::CodexAuth;
+    use codex_model_provider_info::ModelProviderInfo;
+
+    #[test]
+    fn image_generation_tool_auth_allowed_accepts_chatgpt_auth() {
+        let provider = ModelProviderInfo::default();
+        let auth_manager =
+            AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+
+        assert!(image_generation_tool_auth_allowed(
+            Some(&auth_manager),
+            &provider,
+        ));
+    }
+
+    #[test]
+    fn image_generation_tool_auth_allowed_accepts_requires_openai_auth_provider_with_api_key_auth()
+    {
+        let provider = ModelProviderInfo {
+            requires_openai_auth: true,
+            ..ModelProviderInfo::default()
+        };
+        let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-test"));
+
+        assert!(image_generation_tool_auth_allowed(
+            Some(&auth_manager),
+            &provider,
+        ));
+    }
+
+    #[test]
+    fn image_generation_tool_auth_allowed_rejects_api_key_auth_without_provider_opt_in() {
+        let provider = ModelProviderInfo::default();
+        let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-test"));
+
+        assert!(!image_generation_tool_auth_allowed(
+            Some(&auth_manager),
+            &provider,
+        ));
+    }
+
+    #[test]
+    fn image_generation_tool_auth_allowed_rejects_requires_openai_auth_provider_without_auth() {
+        let provider = ModelProviderInfo {
+            requires_openai_auth: true,
+            ..ModelProviderInfo::default()
+        };
+
+        assert!(!image_generation_tool_auth_allowed(None, &provider));
     }
 }
